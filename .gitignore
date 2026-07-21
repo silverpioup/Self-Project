@@ -1,0 +1,6 @@
+target/
+.github/modernize/
+.vscode/
+data/benchmark/
+*.log
+*.tmp

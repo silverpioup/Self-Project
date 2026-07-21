@@ -1,0 +1,17 @@
+# op|table|fields
+# customer: custkey|mktsegment
+# orders: orderkey|custkey|orderdate|shippriority
+# lineitem: orderkey|linenumber|extendedprice|discount|shipdate
++|customer|1|BUILDING
++|customer|2|AUTOMOBILE
++|orders|100|1|1995-03-01|0
++|orders|101|1|1995-03-20|0
++|orders|102|2|1995-02-10|0
++|lineitem|100|1|1000.00|0.05|1995-03-20
++|lineitem|100|2|500.00|0.10|1995-04-01
++|lineitem|101|1|800.00|0.05|1995-04-01
++|lineitem|102|1|200.00|0.00|1995-04-01
+-|lineitem|100|2
++|lineitem|100|3|250.00|0.20|1995-03-18
+-|orders|100
++|orders|100|1|1995-03-01|0
