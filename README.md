@@ -77,16 +77,10 @@ Build:
 mvn clean package
 ```
 
-Run on the sample stream:
+Run on the sample stream with the shaded jar:
 
-```bash
-mvn exec:java -Dexec.mainClass=edu.hkust.ip.flink.TpchQ3ContinuousJob -Dexec.args="data/sample_updates.csv"
-```
-
-Or run the shaded jar:
-
-```bash
-java -jar target/flink-continuous-tpch-q3-1.0.0.jar data/sample_updates.csv
+```powershell
+java --add-opens=java.base/java.util=ALL-UNNAMED -jar target\flink-continuous-tpch-q3-1.0.0.jar data\sample_updates.csv
 ```
 
 The jar also accepts optional benchmark arguments:
