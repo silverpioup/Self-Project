@@ -1,0 +1,7 @@
+snapshot,sqlite_groups,flink_groups,mismatches,status
+1,0,0,0,PASS
+2,0,0,0,PASS
+3,0,0,0,PASS
+4,0,0,0,PASS
+5,1,1,0,PASS
+6,1,1,0,PASS

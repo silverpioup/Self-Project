@@ -2,5 +2,8 @@ target/
 .github/modernize/
 .vscode/
 data/benchmark/
+data/tpch_sf*/
 *.log
 *.tmp
+__pycache__/
+*.pyc

@@ -50,15 +50,26 @@ try {
 
         foreach ($Parallelism in 1, 2, 4, 8) {
             $Timer = [System.Diagnostics.Stopwatch]::StartNew()
-            & java --add-opens=java.base/java.util=ALL-UNNAMED `
+            $RunOutput = & java --add-opens=java.base/java.util=ALL-UNNAMED `
                 -jar $Jar `
                 $InputFile `
                 $Parallelism `
-                quiet *> $null
+                metrics 2>&1
             $Timer.Stop()
 
             if ($LASTEXITCODE -ne 0) {
+                $RunOutput | Write-Host
                 throw "Benchmark run failed for $($Dataset.Name), parallelism $Parallelism."
+            }
+
+            $MetricsLine = $RunOutput | Where-Object { $_ -match "^METRICS\|" } |
+                Select-Object -Last 1
+            if (-not $MetricsLine) {
+                throw "No latency metrics returned for $($Dataset.Name), parallelism $Parallelism."
+            }
+            $Metrics = $MetricsLine -split "\|"
+            if ([int64]$Metrics[1] -ne $UpdateCount) {
+                throw "Latency sample count does not match update count."
             }
 
             $Seconds = [Math]::Max($Timer.Elapsed.TotalSeconds, 0.001)
@@ -70,7 +81,10 @@ try {
                 parallelism = $Parallelism
                 wall_clock_seconds = [Math]::Round($Seconds, 3)
                 throughput_updates_per_second = [Math]::Round($UpdateCount / $Seconds, 2)
-                avg_latency_ms_per_update = [Math]::Round(($Seconds * 1000.0) / $UpdateCount, 4)
+                mean_latency_us = [Math]::Round([double]$Metrics[2], 2)
+                p50_latency_us = [int64]$Metrics[3]
+                p95_latency_us = [int64]$Metrics[4]
+                p99_latency_us = [int64]$Metrics[5]
             }
         }
     }

@@ -1,10 +1,12 @@
-# HKUST IP Flink Project
+# Continuous TPC-H Q3 Maintenance with Apache Flink
 
-This package completes the project scope from the proposal and briefing notes: a small Apache Flink prototype for continuous query processing over TPC-H-style updates, plus a correctness checker and final write-up materials.
+This project implements incremental maintenance of TPC-H Query 3 over
+`customer`, `orders`, and `lineitem` updates. The Flink job keeps managed
+keyed state and emits only result groups changed by each insertion or deletion.
 
-## Implemented Query
+Repository: https://github.com/silverpioup/Self-Project
 
-The prototype implements TPC-H Q3, the query highlighted in the project briefing and Cquirrel demo:
+## Query
 
 ```sql
 SELECT
@@ -23,9 +25,27 @@ ORDER BY revenue DESC, o_orderdate
 LIMIT 10;
 ```
 
-Q3 satisfies the minimum requirement because it joins three TPC-H tables and includes grouping and aggregation. It is also the query explicitly described in the Flink/Cquirrel part of the meeting transcript.
+The query contains two acyclic foreign-key joins, selections, grouping, and
+aggregation. The job maintains every revenue group so that the ordered top ten
+can be derived without rerunning the joins.
 
-## Project Structure
+## Implementation
+
+The ordered input receives a global sequence number and is then routed to
+order shards:
+
+- `orders` and `lineitem` updates go to `orderkey mod parallelism`.
+- `customer` updates are copied to every shard because each customer may have
+  orders in several shards.
+- Each shard uses Flink `MapState` for customers, orders, reverse indexes,
+  lineitems, and current group revenue.
+- The stateful Q3 operator runs at the requested parallelism. It is no longer
+  fixed at parallelism one.
+
+This arrangement keeps all data for one order in the same keyed shard while
+preserving the effect of customer updates across shards.
+
+## Project Files
 
 ```text
 pom.xml
@@ -33,26 +53,63 @@ src/main/java/edu/hkust/ip/flink/TpchQ3ContinuousJob.java
 src/main/resources/simplelogger.properties
 data/sample_updates.csv
 data/expected_sample_snapshots.csv
-results/benchmark_results.csv
-results/sqlite_q3_snapshots_large.csv
+data/tpch_fixture/*.tbl
+scripts/convert_tpch_tbl_to_updates.py
+scripts/generate_tpch_sf.py
 scripts/generate_benchmark_updates.py
-scripts/run_benchmark.ps1
+scripts/compare_flink_sqlite.py
 scripts/verify_q3_sqlite.py
 scripts/run_sample.ps1
-materials_summary.md
+scripts/run_correctness.ps1
+scripts/run_benchmark.ps1
+scripts/run_tpch_experiment.ps1
+results/benchmark_results.csv
+results/tpch_sf_results.csv
+results/correctness_*.csv
 final_report.md
-presentation_outline.md
+YUN_Hanxu_21286712_Final_Report.pdf
 ```
 
-## Update Stream Format
+## Requirements
 
-The input stream is pipe-separated:
+- JDK 17
+- Maven 3.9 or newer
+- Python 3
+- Optional TPC-H generation dependency:
+
+```powershell
+python -m pip install -r requirements-experiments.txt
+```
+
+## Build and Run
+
+```powershell
+mvn clean package
+java --add-opens=java.base/java.util=ALL-UNNAMED `
+  -jar target\flink-continuous-tpch-q3-1.0.0.jar `
+  data\sample_updates.csv 4 print
+```
+
+The arguments are:
 
 ```text
-op|table|fields...
+<input> <parallelism> <print|quiet|metrics|both>
 ```
 
-Supported records:
+`metrics` prints one final line containing the number of measured updates,
+mean latency, and P50/P95/P99 latency in microseconds:
+
+```text
+METRICS|count|mean_us|p50_us|p95_us|p99_us
+```
+
+The helper command builds and runs the sample:
+
+```powershell
+.\scripts\run_sample.ps1
+```
+
+## Update Format
 
 ```text
 +|customer|custkey|mktsegment
@@ -63,109 +120,76 @@ Supported records:
 -|lineitem|orderkey|linenumber
 ```
 
-## Build and Run
-
-Prerequisites:
-
-```text
-JDK 17, Maven, Python 3
-```
-
-Build:
-
-```bash
-mvn clean package
-```
-
-Run on the sample stream with the shaded jar:
-
-```powershell
-java --add-opens=java.base/java.util=ALL-UNNAMED -jar target\flink-continuous-tpch-q3-1.0.0.jar data\sample_updates.csv
-```
-
-The jar also accepts optional benchmark arguments:
-
-```text
-java -jar target/flink-continuous-tpch-q3-1.0.0.jar <input> <parallelism> <print|quiet>
-```
-
-Example:
-
-```powershell
-java --add-opens=java.base/java.util=ALL-UNNAMED -jar target\flink-continuous-tpch-q3-1.0.0.jar data\sample_updates.csv 1 print
-```
-
-On JDK 17 or newer, Flink's serializer may need an explicit module-opening flag. The project includes a helper script for this:
-
-```powershell
-.\scripts\run_sample.ps1
-```
-
-Equivalent manual command:
-
-```powershell
-java --add-opens=java.base/java.util=ALL-UNNAMED -jar target\flink-continuous-tpch-q3-1.0.0.jar data\sample_updates.csv
-```
-
-Each output line has this format:
+Delta output has this format:
 
 ```text
 sequence|change_type|l_orderkey|o_orderdate|o_shippriority|delta_revenue|current_revenue|reason
 ```
 
-Only changed groups are emitted, matching the delta-enumeration mode described by Cquirrel. If a single update touches multiple tuples that contribute to the same group, the implementation combines them and emits one final delta for that group.
+## Automated Correctness Test
 
-## Correctness Check
-
-Use SQLite as the snapshot baseline:
-
-```bash
-python scripts/verify_q3_sqlite.py data/sample_updates.csv --snapshot-every 1
-```
-
-The checked-in `data/expected_sample_snapshots.csv` file is the expected SQLite snapshot output for the sample stream.
-
-For a larger experiment, generate or convert TPC-H data into the same update format, run the Flink job, and compare selected snapshots against the SQLite output. The meeting notes suggested checking around 10 snapshots rather than every update for large data.
-
-## Benchmark Experiment
-
-The project includes a deterministic TPC-H Q3-style update generator and a benchmark runner:
+The comparison tool runs Flink, reconstructs its complete maintained state at
+selected sequence numbers, replays the same stream in SQLite, and compares all
+Q3 groups rather than only printed examples:
 
 ```powershell
-.\scripts\run_benchmark.ps1
+python scripts\compare_flink_sqlite.py data\sample_updates.csv `
+  --parallelism 4 --snapshot-every 1
 ```
 
-The benchmark builds the jar, generates three update streams, and runs Flink with parallelism `1`, `2`, `4`, and `8`. The generated streams contain inserts, deletes, and replace-style updates over `customer`, `orders`, and `lineitem`.
-
-Latest local results:
-
-| Dataset | Updates | Parallelism | Wall-clock seconds | Throughput updates/s | Avg ms/update |
-|---|---:|---:|---:|---:|---:|
-| small | 5,180 | 1 | 2.033 | 2,548.52 | 0.3924 |
-| small | 5,180 | 2 | 2.007 | 2,581.49 | 0.3874 |
-| small | 5,180 | 4 | 2.012 | 2,574.89 | 0.3884 |
-| small | 5,180 | 8 | 2.016 | 2,569.46 | 0.3892 |
-| medium | 51,800 | 1 | 2.015 | 25,708.94 | 0.0389 |
-| medium | 51,800 | 2 | 1.999 | 25,918.15 | 0.0386 |
-| medium | 51,800 | 4 | 2.030 | 25,516.41 | 0.0392 |
-| medium | 51,800 | 8 | 2.037 | 25,429.86 | 0.0393 |
-| large | 155,400 | 1 | 2.026 | 76,702.20 | 0.0130 |
-| large | 155,400 | 2 | 2.040 | 76,169.97 | 0.0131 |
-| large | 155,400 | 4 | 2.026 | 76,692.74 | 0.0130 |
-| large | 155,400 | 8 | 2.038 | 76,263.43 | 0.0131 |
-
-The full CSV output is saved at `results/benchmark_results.csv`.
-
-For correctness on the largest generated stream, the SQLite checker was run every 10,000 updates:
+Run the full checked suite:
 
 ```powershell
-python .\scripts\verify_q3_sqlite.py data\benchmark\updates_large.csv --snapshot-every 10000 --output results\sqlite_q3_snapshots_large.csv
+.\scripts\run_correctness.ps1
 ```
 
-This produced 150 SQL baseline rows in `results/sqlite_q3_snapshots_large.csv`.
+Checked results:
 
-The current prototype keeps the Q3 maintenance operator at parallelism 1 so that the in-memory relational state remains correct and deterministic. The benchmark still starts Flink with parallelism 1/2/4/8 to measure the effect of the runtime setting on this centralized-state prototype. A fully partitioned version would require redesigning the three-table state with keyed or broadcast state.
+- Sample stream: 13 complete snapshots pass at parallelism 1, 2, 4, and 8.
+- Synthetic large stream: 155,400 updates and 16 snapshots pass at
+  parallelism 8.
+- TPC-H SF 0.01 stream: 76,675 updates and 16 snapshots pass at
+  parallelism 8.
 
-## Notes on Scope
+## TPC-H Data
 
-The implementation is intentionally focused on TPC-H Q3. It demonstrates the algorithmic idea from Cquirrel and the SIGMOD 2020 AJU paper: maintain indexes and update only the affected join/aggregation results after each tuple insertion or deletion. It is not a full reimplementation of the complete Cquirrel system.
+Convert official TPC-H DBGEN output:
+
+```powershell
+python scripts\convert_tpch_tbl_to_updates.py `
+  --customer C:\tpch\customer.tbl `
+  --orders C:\tpch\orders.tbl `
+  --lineitem C:\tpch\lineitem.tbl `
+  --output data\tpch_updates.csv
+```
+
+For a reproducible local TPC-H-compatible dataset, DuckDB's `dbgen` extension
+can generate the tables and run the complete experiment:
+
+```powershell
+.\scripts\run_tpch_experiment.ps1 -ScaleFactor 0.01
+```
+
+SF 0.01 contains 1,500 customers, 15,000 orders, and 60,175 lineitems. The
+converted input contains 76,675 updates.
+
+## Experiments
+
+`scripts\run_benchmark.ps1` generates update-heavy synthetic streams and runs
+the keyed maintenance operator at parallelism 1, 2, 4, and 8. Results include
+throughput and measured P50/P95/P99 end-to-operator latency.
+
+The SF 0.01 TPC-H experiment produced:
+
+| Parallelism | Updates/s | Mean us | P50 us | P95 us | P99 us |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 37,788.28 | 14,632.15 | 14,514 | 22,875 | 23,374 |
+| 2 | 37,935.63 | 17,795.53 | 16,015 | 29,085 | 29,857 |
+| 4 | 37,715.33 | 5,963.91 | 2,961 | 18,259 | 21,590 |
+| 8 | 37,663.54 | 6,338.67 | 3,969 | 19,328 | 27,359 |
+
+These are local bounded-file results and include Flink startup and shutdown.
+Throughput remains nearly constant because the single ordered file source and
+customer replication limit scaling at this data size. The lower median latency
+at parallelism 4 and 8 nevertheless shows that order-sharded maintenance is
+executing concurrently. No linear speedup is claimed.
