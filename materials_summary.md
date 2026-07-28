@@ -25,11 +25,22 @@ The meeting transcript gives the most concrete project instructions. Important p
 
 `Cquirrel.pdf`
 
-Cquirrel is the primary paper for this Flink project. It describes a continuous query processing engine built on Flink for acyclic relational schemas. It supports SPJA queries with primary-key-to-foreign-key joins, arbitrary insertions/deletions, and delta enumeration. The prototype follows this model for TPC-H Q3.
+Cquirrel is the primary paper for this Flink project. It describes a continuous
+query processing engine built on Flink for acyclic relational schemas. It
+supports SPJA queries with primary-key-to-foreign-key joins, arbitrary
+insertions/deletions, and delta enumeration. The prototype follows this model
+for TPC-H Q3 by maintaining live and non-live tuples, child-match counts,
+reverse indexes, changed aggregates, and the ordered Top-10 in Flink managed
+state.
 
 `sigmod20.pdf`
 
-The SIGMOD 2020 AJU paper is the fuller algorithmic reference. It studies incremental maintenance of acyclic foreign-key joins under updates and explains how TPC-H analytical queries can be maintained using the algorithmic framework. The prototype implements the Q3-specific version rather than the full general query engine.
+The SIGMOD 2020 AJU paper is the fuller algorithmic reference. It studies
+incremental maintenance of acyclic foreign-key joins under updates and explains
+how TPC-H analytical queries can be maintained using the algorithmic
+framework. The prototype implements the Q3 chain specialization rather than
+the full general query compiler. Its evaluated FIFO stream is also motivated
+by the paper's low-enclosureness update-sequence example.
 
 ## Files Treated as Background
 

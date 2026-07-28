@@ -10,50 +10,61 @@
 
 ## Abstract
 
-This project implements continuous incremental maintenance of TPC-H Query 3
-using Apache Flink. The query joins `customer`, `orders`, and `lineitem`,
-applies date and market-segment predicates, and aggregates revenue by order.
-Instead of recomputing the SQL query after every update, the system stores
-relation indexes and result-group revenue in Flink managed keyed state. Orders
-and lineitems are partitioned by order key, while customer updates are
-replicated to the order shards. The stateful operator therefore runs with
-actual parallelism 1, 2, 4, or 8. Correctness is evaluated by reconstructing
-the complete Flink result at selected snapshots and comparing it with an
-independent SQLite execution. All checked snapshots pass on a corner-case
-stream, a 155,400-update synthetic stream, and TPC-H scale-factor 0.01 data.
+This project implements continuous maintenance of TPC-H Query 3 over
+insertions and deletions using Apache Flink. The implementation specializes the
+live-tuple algorithm described by Wang and Yi and demonstrated in Cquirrel to
+the foreign-key chain `lineitem -> orders -> customer`. It stores base tuples,
+reverse indexes, live-state information, and aggregate revenue in Flink managed
+state. Only a transition of a live root lineitem changes the query result.
+Orders and lineitems are partitioned across keyed workers, while customer
+updates are replicated to the order shards. Revenue is represented with exact
+fixed-point integers, and the official ordered Top-10 is maintained after each
+input update.
+
+Correctness was checked independently with SQLite. The verifier reconstructed
+the complete Flink result and compared all groups and every emitted Top-10
+change. All checks passed for hand-written corner cases, a 155,400-update
+synthetic stream, a small TPC-H fixture, and a 1,140,816-update TPC-H SF0.1
+FIFO stream. A repeated local experiment used parallelism 1, 2, 4, and 8 and
+confirmed that every configured worker was active. Parallelism 2 achieved the
+highest mean processing throughput, 895,123.76 updates/s.
 
 ## 1. Background and Related Work
 
-Continuous analytical applications evaluate registered queries while their
-input relations change. Re-executing a multi-table query after every inserted
-or deleted tuple repeats joins and aggregation work that is unrelated to the
-changed record. Incremental view maintenance instead derives the change in the
-answer from the update and the current indexed state.
+Continuous analytical applications evaluate a registered query while the base
+relations change. Re-running a multi-table query after each tuple update
+repeats joins and aggregation work that is unrelated to the changed tuple.
+Incremental view maintenance instead updates a data structure for the current
+database and enumerates only the difference between the old and new answers.
 
-The project follows the setting of Cquirrel, a continuous query processing
-system for acyclic relational schemas. Cquirrel supports selection,
-projection, joins, and aggregation under insertions and deletions, and uses
-delta enumeration to report changed answers. The AJU work provides the fuller
-algorithmic basis for maintaining acyclic foreign-key joins under updates.
-These assumptions match TPC-H Query 3 because its joins form the acyclic chain
-`customer <- orders <- lineitem`.
+Wang and Yi study this problem for acyclic primary-key/foreign-key joins. Their
+algorithm maintains live tuples and supports insertions and deletions to any
+relation. Its amortized update bound is expressed using the enclosureness of an
+update sequence. FIFO streams are an important low-enclosureness case. The
+paper further shows how the method supports all TPC-H queries and reports an
+implementation on Flink.
 
-TPC-H supplies a standard decision-support schema, analytical queries, and a
-scale-factor data generator. Query 3 was selected because it is the typical
-three-table example identified in the project briefing. It contains two
-foreign-key joins, selections, grouping, aggregation, and top-k ordering while
-remaining suitable for a focused three-credit implementation.
+Cquirrel presents the corresponding continuous-query system. It accepts an
+initially empty database followed by a Flink DataStream of insertions and
+deletions, and uses delta enumeration as the output model. Its Q3 example
+maintains indexes for customer, orders, lineitem, and aggregation. This project
+reproduces that algorithmic pattern for one query, with additional exact
+correctness and parallelism instrumentation. It does not claim to implement
+Cquirrel's general query compiler.
 
-## 2. Query and Incremental Algorithm
+TPC-H Q3 was selected because it is the three-table example identified in the
+project briefing. It combines an acyclic foreign-key join with selections,
+grouped SUM, ordering, and a Top-10 limit.
+
+## 2. Query and Algorithm
 
 The maintained query is:
 
 ```sql
-SELECT
-  l_orderkey,
-  SUM(l_extendedprice * (1 - l_discount)) AS revenue,
-  o_orderdate,
-  o_shippriority
+SELECT l_orderkey,
+       SUM(l_extendedprice * (1 - l_discount)) AS revenue,
+       o_orderdate,
+       o_shippriority
 FROM customer, orders, lineitem
 WHERE c_mktsegment = 'BUILDING'
   AND c_custkey = o_custkey
@@ -65,147 +76,168 @@ ORDER BY revenue DESC, o_orderdate
 LIMIT 10;
 ```
 
-The maintained group key is
-`(l_orderkey, o_orderdate, o_shippriority)`. A qualifying lineitem contributes
-`l_extendedprice * (1 - l_discount)` to its group. The system retains every
-non-zero group, allowing the ordered top ten to be derived without repeating
-the joins.
+Under the paper's edge direction, the foreign-key DAG is
+`lineitem -> orders -> customer`; `lineitem` is the root and `customer` is the
+leaf. A customer tuple is live when it passes the BUILDING selection. An order
+is live when it passes the order-date selection and references a live
+customer. A lineitem is live when it passes the ship-date selection and
+references a live order. Thus a live root tuple corresponds to exactly one
+qualifying Q3 join result.
 
-For a lineitem update, the algorithm checks one order and its referenced
-customer. If the predicates hold, the lineitem contribution is added or
-subtracted. For an order update, only lineitems indexed under that order are
-visited. For a customer update, only orders indexed under that customer and
-their lineitems are visited. Contributions produced by one input update are
-combined by group before output. A non-zero result emits `UPSERT_GROUP`; a
-group reduced to zero is removed and emits `DELETE_GROUP`.
+For each non-leaf tuple the implementation stores a child-match count and a
+live flag. Q3's graph is a chain, so this count is zero or one. Inserting,
+deleting, or changing the live state of a tuple propagates only through reverse
+indexes to its direct parents. When a lineitem changes from non-live to live,
+its fixed-point revenue is added to its group; the reverse transition subtracts
+the same amount. This is the Q3 specialization of bottom-up live-tuple
+maintenance. No intermediate customer-orders or orders-lineitem join is
+materialized.
+
+The group key is `(orderkey, orderdate, shippriority)`. After applying all
+deltas belonging to one input sequence, the global stage updates a sorted
+ranking with revenue descending, followed by order date and order key for
+deterministic ties. It emits a complete Top-10 only when that ranking changes.
+
+Prices are parsed as cents and discounts as hundredths. The contribution
+`extendedprice * (100 - discount) / 100` is retained internally as a signed
+64-bit integer in units of 0.0001 dollars. SQLite uses the identical integer
+formula. Consequently, validation does not use an epsilon or floating-point
+tolerance.
 
 ## 3. Implementation Details
 
-The implementation uses Java, Apache Flink 1.19.1, Maven, and JDK 17. A
-single-parallelism file source preserves input order and assigns a global
-sequence number. The routing stage sends orders and lineitems to
-`orderkey mod parallelism`. Customer changes are sent to every shard because a
-customer may have orders in several partitions. The stream is keyed by shard
-identifier and processed by a parallel keyed process function.
+The system uses Java 11-compatible bytecode, JDK 17, Apache Flink 1.19.1, and
+Maven. A single file source preserves the bounded stream order. A process
+function assigns a global sequence number and checkpoints that number as
+operator state.
 
-Each shard owns Flink `MapState` for customers, orders, orders indexed by
-customer, lineitems indexed by order, and current revenue by result group. All
-records belonging to one order therefore share one state partition, while
-every shard has the customer state needed to evaluate its orders. The stateful
-maintenance operator itself runs at the requested parallelism rather than
-remaining centralized.
+Orders and lineitems are routed by `orderkey mod p`, where `p` is the requested
+parallelism. Customer updates are copied to all shards because one customer's
+orders can span several shards. Flink's default hash partitioning does not
+guarantee that small integer shard identifiers use all subtasks. `RoutingPlan`
+therefore uses Flink's key-group assignment to choose one partition key that
+maps to each physical subtask. Unit tests verify the one-to-one mapping for
+parallelism 1, 2, 4, 8, and 16.
 
-The input format represents insertion and deletion directly:
+The parallel `CquirrelQ3ShardFunction` maintains customers, orders,
+orders-by-customer, lineitems, lineitems-by-order, live flags, and child-match
+counts in keyed `MapState`. A strict update contract rejects duplicate
+insertions, missing-tuple deletions, malformed field counts, invalid dates, and
+invalid monetary values. A replacement is represented by delete followed by
+insert so that every delta has an unambiguous inverse.
 
-```text
-+|customer|custkey|mktsegment
--|customer|custkey
-+|orders|orderkey|custkey|orderdate|shippriority
--|orders|orderkey
-+|lineitem|orderkey|linenumber|extendedprice|discount|shipdate
--|lineitem|orderkey|linenumber
-```
+Shard responses retain the input sequence. The global keyed function waits for
+all expected responses, which is especially important for replicated customer
+updates, then combines group deltas and applies them in sequence order. Its
+managed state stores current group revenue and pending sequence batches. A
+sorted in-memory ranking is rebuilt from managed revenue state after recovery.
 
-The output contains the sequence number, change type, group key, revenue
-delta, current revenue, and reason. The repository includes build and run
-scripts, sample data, a TPC-H `.tbl` converter, deterministic workload
-generation, automated correctness comparison, benchmark scripts, result
-tables, and the final report.
+Optional checkpoints use Flink's EXACTLY_ONCE mode for managed keyed and
+operator state. The evaluation sink prints to standard output and is not a
+transactional sink. Therefore the state is recoverable exactly once, but a
+failure could duplicate already printed records. A production deployment
+would use a checkpoint-aware Kafka or filesystem sink.
+
+The repository also contains deterministic workload generators, official
+DBGen RF1/RF2 conversion, SQLite verification, repeated benchmarking, unit
+tests, portable PowerShell runners, raw results, and this report.
 
 ## 4. Experimental Setup and Data Sets
 
-Experiments were executed locally with Flink 1.19.1 and JDK 17. Every bounded
-file run includes Flink startup and shutdown. Throughput is input updates
-divided by wall-clock execution time. Latency is measured from sequence
-assignment to completion of keyed-state maintenance. The program reports mean,
-P50, P95, and P99 values in microseconds.
+Experiments were executed on Windows 10 with JDK 17.0.19, 20 logical CPUs, and
+a 4 GB JVM heap. Flink ran locally in one JVM. Each performance setting used
+one warm-up and three measured repetitions. The benchmark records two
+throughput values: internal processing throughput from the first sequenced
+update to completion of the last update, and wall-clock throughput including
+local Flink/JVM startup and shutdown. Latency is measured once per original
+update, after all shard responses and the global Top-10 update complete.
 
-Three inputs were used:
+The principal data set was generated using DuckDB's TPC-H-compatible dbgen at
+SF0.1: 15,000 customers, 150,000 orders, and 600,572 lineitems. A deterministic
+FIFO generator first loads all customers and a 75,000-order active window.
+For each remaining order, it deletes the oldest order's lineitems and then the
+order, followed by the new order and its lineitems. The stream contains
+1,140,816 updates: 765,572 insertions and 375,244 deletions. This workload
+models the FIFO update sequence discussed in the algorithm paper; it is not an
+audited TPC benchmark result.
 
-| Data set | Description | Updates |
-|---|---|---:|
-| Sample | Hand-written insert/delete corner cases | 13 |
-| Synthetic large | Update-heavy customer/order/lineitem stream | 155,400 |
-| TPC-H SF 0.01 | 1,500 customers, 15,000 orders, 60,175 lineitems | 76,675 |
+Additional tests used a 13-update hand-written stream, an eight-update TPC-H
+fixture, and a 155,400-update synthetic stream. The hand-written stream covers
+late-arriving parents, lineitem deletion, order deletion and reinsertion,
+customer predicate changes, and group removal.
 
-The TPC-H tables were generated by DuckDB's TPC-H-compatible `dbgen`
-extension and converted into the project update format. The converter also
-accepts official DBGEN `.tbl` column layouts. These measurements are local
-project experiments, not audited TPC benchmark results.
-
-Correctness is tested independently with SQLite. The comparison program runs
-Flink, reconstructs the complete maintained state from emitted deltas, replays
-the same updates into SQLite, executes the grouped Q3 SQL, and compares every
-group and revenue value. The sample is checked after every update at
-parallelism 1, 2, 4, and 8. Sixteen complete snapshots are checked for each
-large data set at parallelism 8.
+For correctness, the same stream is replayed into an independent in-memory
+SQLite database. At selected sequences, the verifier executes grouped Q3 SQL
+and compares every exact group with the state reconstructed from Flink deltas.
+Every Top-10 emitted by Flink is compared with the SQLite ranking at that exact
+sequence.
 
 ## 5. Experimental Results and Discussion
 
-All correctness comparisons pass:
+All recorded correctness checks passed:
 
-| Data set | Parallelism | Snapshots | Result |
-|---|---:|---:|---|
-| Sample | 1, 2, 4, 8 | 13 per setting | PASS |
-| Synthetic large | 8 | 16 | PASS |
-| TPC-H SF 0.01 | 8 | 16 | PASS |
+| Workload | p | Updates | Group snapshots | Top-10 changes | Result |
+|---|---:|---:|---:|---:|---|
+| Hand-written | 1, 2, 4, 8 | 13 | 13 each | 6 each | PASS |
+| TPC-H fixture FIFO | 4 | 8 | 8 | 1 | PASS |
+| Synthetic | 8 | 155,400 | 16 | 351 | PASS |
+| TPC-H SF0.1 FIFO | 8 | 1,140,816 | 12 | 141 | PASS |
 
-The TPC-H SF 0.01 performance results are:
+Every comparison reported zero group mismatches. The SF0.1 test validates more
+than a final snapshot: it checks 12 complete states and all 141 points at which
+Flink emitted a changed Top-10.
 
-| Parallelism | Updates/s | Mean us | P50 us | P95 us | P99 us |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 37,788.28 | 14,632.15 | 14,514 | 22,875 | 23,374 |
-| 2 | 37,935.63 | 17,795.53 | 16,015 | 29,085 | 29,857 |
-| 4 | 37,715.33 | 5,963.91 | 2,961 | 18,259 | 21,590 |
-| 8 | 37,663.54 | 6,338.67 | 3,969 | 19,328 | 27,359 |
+The repeated SF0.1 measurements were:
 
-Throughput remains close to 37,700-37,900 updates per second. At this data
-size, the ordered file source, fixed startup cost, and replication of customer
-updates limit throughput scaling. P50 latency falls from 14,514 microseconds at
-parallelism 1 to 2,961 microseconds at parallelism 4, which is consistent with
-concurrent order-shard processing. Parallelism 8 does not improve on
-parallelism 4 because additional routing and customer replication offset the
-available concurrency.
+| p | Active | Processing updates/s | Std. dev. | Wall updates/s | Mean us | P50 us | P95 us | P99 us |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 654,465.24 | 68,597.79 | 93,109.04 | 7,547.01 | 6,340 | 14,736.67 | 27,103.33 |
+| 2 | 2 | 895,123.76 | 138,713.22 | 96,765.30 | 6,543.48 | 5,233.33 | 14,846.67 | 31,353.33 |
+| 4 | 4 | 828,483.05 | 35,911.26 | 96,157.05 | 5,275.98 | 3,196.67 | 16,320.00 | 44,766.67 |
+| 8 | 8 | 756,174.26 | 12,483.74 | 94,893.49 | 10,567.00 | 6,680 | 34,033.33 | 73,646.67 |
 
-The large synthetic stream reaches 74,925.82 updates per second at parallelism
-1, but approximately 50,200 updates per second at parallelism 4 and 8. That
-generator creates one customer update for every order, so broadcasting those
-updates increases total operator work with the number of shards. The result
-shows that the partitioning strategy is most appropriate when lineitem and
-order updates dominate customer changes. No linear speedup is claimed.
+The active-worker count equalled the configured parallelism in every measured
+run. Worker-level record counters also showed non-zero work on every subtask,
+so these are genuine parallel executions rather than repeated single-worker
+runs.
 
-The implementation meets the central functional objectives: three-table
-TPC-H processing, insertions and deletions, incremental maintenance, managed
-Flink state, changed-group output, complete SQL verification, larger data
-sets, actual stateful-operator parallelism, and percentile latency
-measurement.
+Parallelism 2 produced the highest mean internal throughput, 36.8% above
+parallelism 1. Parallelism 4 was 26.6% above parallelism 1 and had the lowest
+mean and median latency. Parallelism 8 remained 15.5% above parallelism 1 in
+throughput but increased tail latency. The non-monotonic result is expected
+from this design: customer updates are replicated to every shard, routing work
+grows with `p`, and exact sequence ordering plus global group/ranking
+maintenance is centralized. The experiment therefore demonstrates useful
+parallelism but not linear scalability.
+
+Wall-clock throughput is nearly flat because each bounded run spends about ten
+seconds starting and closing the local Flink runtime. Internal processing
+throughput better isolates the algorithm, while wall-clock throughput describes
+the experience of running the supplied command. Both values are retained to
+avoid selecting only the more favorable measure.
 
 ## 6. Future Directions
 
-The present system is query-specific rather than a general Cquirrel
-reimplementation. A future version could compile more SPJA queries and derive
-indexes automatically. Customer replication could be reduced by maintaining a
-customer-to-shard subscription index or by introducing a separate enrichment
-stage. A long-running Kafka experiment would separate steady-state throughput
-from bounded-job startup cost. Further evaluation should cover checkpointing,
-failure recovery, state-backend selection, cluster execution, and larger
-official DBGEN scale factors.
+The next step would be to replace customer replication with a
+customer-to-shard subscription index and evaluate the operators on a
+multi-node Flink cluster. A long-running Kafka source would remove bounded-job
+startup from steady-state measurements. Failure-injection tests with a
+transactional sink would verify end-to-end exactly-once behavior. Finally, a
+compiler could derive the live-state indexes and propagation rules for a
+broader class of SPJA queries, including general DAGs where assertion keys are
+required.
 
 ## References
 
-1. Q. Wang et al., "Cquirrel: Continuous Query Processing over Acyclic
-   Relational Schemas," PVLDB, vol. 14, no. 12, 2021.
-2. Q. Wang and K. Yi, "Maintaining Acyclic Foreign-Key Joins under Updates,"
-   SIGMOD, 2020.
-3. Transaction Processing Performance Council, *TPC Benchmark H Standard
-   Specification*, Revision 3.0.1.
-4. Apache Flink 1.19 Documentation.
-5. Project code: https://github.com/silverpioup/Self-Project
+1. Q. Wang and K. Yi, "Maintaining Acyclic Foreign-Key Joins under Updates," *Proceedings of ACM SIGMOD*, 2020, doi:10.1145/3318464.3380586.
+2. Q. Wang et al., "Cquirrel: Continuous Query Processing over Acyclic Relational Schemas," *Proceedings of the VLDB Endowment*, 2021.
+3. Transaction Processing Performance Council, *TPC Benchmark H Standard Specification*, current version.
+4. Apache Flink, *Flink 1.19 Documentation*.
 
 # Appendix A: Meeting Minutes
 
-The fourth meeting is scheduled for early August. Its entry is a draft agenda
-and should be changed to completed minutes after the meeting.
+The fourth entry is a draft agenda because the meeting is scheduled after the
+date of this report revision.
 
 ## Minutes of the 1st Project Meeting
 
@@ -213,7 +245,7 @@ and should be changed to completed minutes after the meeting.
 **Time:** 4:00 pm-4:22 pm  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu; other CSIT6910 students  
-**Apology:** None recorded  
+**Apology:** None  
 **Note-taker:** YUN Hanxu
 
 ### 1. Approval of minutes
@@ -223,19 +255,17 @@ approve.
 
 ### 2. Discussion items
 
-The supervisor introduced TPC-H and the two independent-project directions.
-For the Flink project, the selected query should involve at least three tables;
-Q3 was identified as the standard minimum example. The student should generate
-an insertion/deletion stream, implement incremental processing with a Flink
-process function and maintained state, output affected groups, verify selected
-snapshots against a conventional database, and then evaluate throughput and
-parallelism. The student was asked to read Cquirrel, with the AJU paper as the
-fuller reference.
+The supervisor introduced TPC-H and the project directions. For the Flink
+project, the query should involve at least three tables; Q3 was identified as
+the standard minimum example. The work should generate insertions and
+deletions, implement the Cquirrel/AJU update algorithm with a Flink process
+function and maintained state, emit affected groups, verify snapshots with a
+conventional database, and then evaluate throughput and parallelism.
 
 ### 3. Meeting adjournment and next meeting
 
-The briefing ended at approximately 4:22 pm. The next consultation would
-review the selected query, update format, and implementation design.
+The meeting adjourned at approximately 4:22 pm. The next meeting would review
+the selected query, update representation, and state design.
 
 ## Minutes of the 2nd Project Meeting
 
@@ -243,7 +273,7 @@ review the selected query, update format, and implementation design.
 **Time:** 4:00 pm-4:30 pm  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
-**Apology:** None recorded  
+**Apology:** None  
 **Note-taker:** YUN Hanxu
 
 ### 1. Approval of minutes
@@ -252,16 +282,16 @@ The first meeting's requirements and the selection of TPC-H Q3 were reviewed.
 
 ### 2. Discussion items
 
-The Q3 predicates, foreign-key chain, group key, and revenue expression were
-confirmed. The update representation was defined for customer, orders, and
-lineitem insertions and deletions. The planned state consisted of primary-key
-maps, reverse indexes from customer to orders and order to lineitems, and a
-revenue map. SQLite was selected as the independent correctness baseline.
+The Q3 predicates, foreign-key chain, group key, and fixed-point revenue
+expression were confirmed. The update representation was defined for all three
+relations. The planned state included primary-key maps, customer-to-order and
+order-to-lineitem indexes, live flags, child-match counts, and group revenue.
+SQLite was selected as the independent correctness baseline.
 
 ### 3. Meeting adjournment and next meeting
 
-The next meeting would review the runnable Flink implementation and sample
-correctness results.
+The meeting adjourned at 4:30 pm. The next meeting would review the runnable
+Flink implementation and sample correctness results.
 
 ## Minutes of the 3rd Project Meeting
 
@@ -269,27 +299,27 @@ correctness results.
 **Time:** 4:00 pm-4:30 pm  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
-**Apology:** None recorded  
+**Apology:** None  
 **Note-taker:** YUN Hanxu
 
 ### 1. Approval of minutes
 
-The query definition, update format, state indexes, and SQLite verification
-plan from the second meeting were reviewed.
+The query, update format, state indexes, and SQLite verification plan from the
+second meeting were reviewed.
 
 ### 2. Discussion items
 
-The working Java/Flink job and sample delta output were reviewed. Insertions,
-deletions, replacement operations, and removal of zero-revenue groups were
-tested. The correctness process was strengthened to reconstruct the complete
-Flink state and compare every result group with SQLite. The next tasks were to
-convert scale-factor data, move the state into Flink managed keyed state, and
-test parallelism 1, 2, 4, and 8.
+The Java/Flink job and changed-group output were demonstrated. Insertions,
+deletions, late-arriving parents, replacement operations, and removal of
+zero-revenue groups were tested. The verification procedure was extended to
+reconstruct the complete Flink state and compare every group and emitted
+Top-10 with SQLite. The remaining work was to run larger TPC-H FIFO data,
+verify worker activity, repeat the parallel experiment, and finish the report.
 
 ### 3. Meeting adjournment and next meeting
 
-The next meeting would review the larger-data correctness checks,
-parallel-performance measurements, and final report.
+The meeting adjourned at 4:30 pm. The next meeting would review the final
+correctness evidence, parallel measurements, limitations, and report.
 
 ## Draft Minutes of the 4th Project Meeting (Scheduled)
 
@@ -297,7 +327,7 @@ parallel-performance measurements, and final report.
 **Time:** 4:00 pm-4:30 pm  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
-**Apology:** None recorded  
+**Apology:** None  
 **Note-taker:** YUN Hanxu
 
 ### 1. Approval of minutes
@@ -307,15 +337,14 @@ will be reviewed.
 
 ### 2. Discussion items
 
-The final keyed-state design, TPC-H `.tbl` conversion, and experimental results
-will be presented. The sample passed at parallelism 1, 2, 4, and 8. The
-155,400-update synthetic stream and the 76,675-update TPC-H SF 0.01 stream each
-passed 16 complete SQLite snapshot comparisons at parallelism 8. Throughput
-and mean/P50/P95/P99 latency results will be discussed, including the scaling cost
-of replicating customer updates. The final report structure, repository link,
-limitations, and future directions will be reviewed.
+The planned presentation covers the live-tuple algorithm, exact fixed-point
+aggregation, managed-state and checkpoint design, deterministic TPC-H SF0.1
+FIFO stream, SQLite comparisons, and three repeated runs at parallelism 1, 2,
+4, and 8. The discussion will also address the centralized ordered Top-10
+stage, customer replication, local-runtime limitations, repository contents,
+and possible corrections to the final submission.
 
 ### 3. Meeting adjournment and next meeting
 
-The intended outcome is approval of the final report and code submission,
-subject to any corrections requested during the meeting.
+The intended outcome is confirmation of the final code and report, subject to
+corrections requested during the meeting.

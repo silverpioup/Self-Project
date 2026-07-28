@@ -1,0 +1,5 @@
+dataset,parallelism,repetitions,updates,active_workers,mean_processing_throughput,stdev_processing_throughput,mean_wall_clock_throughput,mean_latency_us,mean_p50_latency_us,mean_p95_latency_us,mean_p99_latency_us
+tpch_sf01_fifo,1,3,1140816,1,654465.24,68597.79,93109.04,7547.01,6340.0,14736.67,27103.33
+tpch_sf01_fifo,2,3,1140816,2,895123.76,138713.22,96765.3,6543.48,5233.33,14846.67,31353.33
+tpch_sf01_fifo,4,3,1140816,4,828483.05,35911.26,96157.05,5275.98,3196.67,16320.0,44766.67
+tpch_sf01_fifo,8,3,1140816,8,756174.26,12483.74,94893.49,10567.0,6680.0,34033.33,73646.67

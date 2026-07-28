@@ -1,0 +1,10 @@
+# TPC-H-derived FIFO update stream
+# seed=1|warmup_fraction=0.5|orders=2
++|customer|1|BUILDING
++|customer|2|AUTOMOBILE
++|orders|200|2|1995-03-01|0
++|lineitem|200|1|500.00|0.00|1995-03-20
+-|lineitem|200|1
+-|orders|200
++|orders|100|1|1995-03-01|0
++|lineitem|100|1|1000.00|0.05|1995-03-20

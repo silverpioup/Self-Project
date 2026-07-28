@@ -36,6 +36,11 @@ def generate_updates(output: Path, orders: int, lineitems_per_order: int) -> int
                 writer.write(f"-|orders|{orderkey}\n")
                 writer.write(f"+|orders|{orderkey}|{custkey}|{order_date}|{ship_priority}\n")
                 count += 2
+
+            if i % 50 == 0:
+                writer.write(f"-|customer|{custkey}\n")
+                writer.write(f"+|customer|{custkey}|{segment}\n")
+                count += 2
     return count
 
 

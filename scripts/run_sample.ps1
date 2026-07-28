@@ -1,12 +1,7 @@
-$ErrorActionPreference = "Stop"
+. "$PSScriptRoot\common.ps1"
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$jarPath = Join-Path $projectRoot "target\flink-continuous-tpch-q3-1.0.0.jar"
-$samplePath = Join-Path $projectRoot "data\sample_updates.csv"
-
-if (-not (Test-Path -LiteralPath $jarPath)) {
-    Write-Host "Jar not found. Building project first..."
-    mvn clean package
-}
-
-java --add-opens=java.base/java.util=ALL-UNNAMED -jar $jarPath $samplePath
+Build-Q3Project
+Invoke-Q3Job `
+    -InputFile (Join-Path $script:ProjectRoot "data\sample_updates.csv") `
+    -Parallelism 4 `
+    -OutputMode print

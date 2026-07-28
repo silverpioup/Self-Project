@@ -1,12 +1,14 @@
 # Continuous TPC-H Q3 Maintenance with Apache Flink
 
-This project implements incremental maintenance of TPC-H Query 3 over
-`customer`, `orders`, and `lineitem` updates. The Flink job keeps managed
-keyed state and emits only result groups changed by each insertion or deletion.
+This repository contains a query-specific implementation of the live-tuple
+maintenance algorithm used by Cquirrel/AJU for TPC-H Query 3. It processes
+insertions and deletions over `customer`, `orders`, and `lineitem`, maintains
+the grouped revenue and official Q3 Top-10 incrementally, and emits only result
+changes.
 
-Repository: https://github.com/silverpioup/Self-Project
+Code: https://github.com/silverpioup/Self-Project
 
-## Query
+## Maintained Query
 
 ```sql
 SELECT
@@ -25,91 +27,80 @@ ORDER BY revenue DESC, o_orderdate
 LIMIT 10;
 ```
 
-The query contains two acyclic foreign-key joins, selections, grouping, and
-aggregation. The job maintains every revenue group so that the ordered top ten
-can be derived without rerunning the joins.
+The foreign-key DAG is `lineitem -> orders -> customer`, with `lineitem` as
+the root relation under the paper's edge convention. The implementation keeps
+each tuple's live/non-live status and its child-match count. A root lineitem
+contributes revenue exactly when it is live. A transition into or out of the
+live set produces the corresponding aggregate delta; unrelated join results
+are never materialized.
 
-## Implementation
+This is a strict Q3 specialization, not a general SQL-to-Flink compiler.
+Because Q3's join graph is a chain, each non-leaf tuple has one child relation
+and its child-match count is either zero or one. The assertion-key machinery
+needed by general DAG-shaped queries is therefore unnecessary.
 
-The ordered input receives a global sequence number and is then routed to
-order shards:
+## Design
 
-- `orders` and `lineitem` updates go to `orderkey mod parallelism`.
-- `customer` updates are copied to every shard because each customer may have
-  orders in several shards.
-- Each shard uses Flink `MapState` for customers, orders, reverse indexes,
-  lineitems, and current group revenue.
-- The stateful Q3 operator runs at the requested parallelism. It is no longer
-  fixed at parallelism one.
+- The source assigns a checkpointed global sequence number in input order.
+- Orders and lineitems are routed by `orderkey mod parallelism`.
+- Customer updates are replicated to all order shards.
+- `RoutingPlan` selects one Flink key group for every requested subtask, so
+  logical shards map one-to-one to physical workers.
+- Each shard maintains customers, orders, reverse indexes, lineitems,
+  live-state flags, and child-match counts in Flink managed `MapState`.
+- A single ordered global stage combines all shard responses for one input
+  sequence, maintains exact group revenue, and updates the Q3 Top-10.
+- Prices are parsed as cents and discounts as hundredths. Revenue is stored as
+  a `long` in units of 0.0001 dollars; no floating-point comparison is used.
+- Duplicate insertions, deletion of a missing tuple, and malformed updates are
+  rejected. Replacement is represented explicitly as delete followed by
+  insert.
 
-This arrangement keeps all data for one order in the same keyed shard while
-preserving the effect of customer updates across shards.
-
-## Project Files
-
-```text
-pom.xml
-src/main/java/edu/hkust/ip/flink/TpchQ3ContinuousJob.java
-src/main/resources/simplelogger.properties
-data/sample_updates.csv
-data/expected_sample_snapshots.csv
-data/tpch_fixture/*.tbl
-scripts/convert_tpch_tbl_to_updates.py
-scripts/generate_tpch_sf.py
-scripts/generate_benchmark_updates.py
-scripts/compare_flink_sqlite.py
-scripts/verify_q3_sqlite.py
-scripts/run_sample.ps1
-scripts/run_correctness.ps1
-scripts/run_benchmark.ps1
-scripts/run_tpch_experiment.ps1
-results/benchmark_results.csv
-results/tpch_sf_results.csv
-results/correctness_*.csv
-final_report.md
-YUN_Hanxu_21286712_Final_Report.pdf
-```
+The keyed and operator state participates in Flink checkpoints when a positive
+checkpoint interval is supplied. The console sink is intended for evaluation
+and is not transactional; a production exactly-once deployment would use a
+checkpoint-aware sink.
 
 ## Requirements
 
 - JDK 17
 - Maven 3.9 or newer
-- Python 3
-- Optional TPC-H generation dependency:
+- Python 3.10 or newer
+- DuckDB only when regenerating TPC-H tables:
 
 ```powershell
 python -m pip install -r requirements-experiments.txt
 ```
 
+Flink 1.19.1 should be run on JDK 17. JDK 25 is not used or supported by this
+project.
+
 ## Build and Run
 
+From the repository root in PowerShell:
+
 ```powershell
-mvn clean package
+mvn clean verify
 java --add-opens=java.base/java.util=ALL-UNNAMED `
   -jar target\flink-continuous-tpch-q3-1.0.0.jar `
-  data\sample_updates.csv 4 print
+  data\sample_updates.csv 4 print 0
 ```
 
-The arguments are:
+The four positional arguments are:
 
 ```text
-<input> <parallelism> <print|quiet|metrics|both>
+<input> <parallelism> <print|quiet|metrics|both> <checkpoint_interval_ms>
 ```
 
-`metrics` prints one final line containing the number of measured updates,
-mean latency, and P50/P95/P99 latency in microseconds:
-
-```text
-METRICS|count|mean_us|p50_us|p95_us|p99_us
-```
-
-The helper command builds and runs the sample:
+The portable helper performs the same build and sample run:
 
 ```powershell
 .\scripts\run_sample.ps1
 ```
 
-## Update Format
+No `mvn exec:java` command is required.
+
+## Input and Output
 
 ```text
 +|customer|custkey|mktsegment
@@ -120,76 +111,122 @@ The helper command builds and runs the sample:
 -|lineitem|orderkey|linenumber
 ```
 
-Delta output has this format:
+Changed groups:
 
 ```text
-sequence|change_type|l_orderkey|o_orderdate|o_shippriority|delta_revenue|current_revenue|reason
+GROUP|sequence|UPSERT_GROUP|orderkey|orderdate|shippriority|delta|current|reason
+GROUP|sequence|DELETE_GROUP|orderkey|orderdate|shippriority|delta|0.0000|reason
 ```
 
-## Automated Correctness Test
+Whenever the ordered result changes, the complete current ranking is emitted:
 
-The comparison tool runs Flink, reconstructs its complete maintained state at
-selected sequence numbers, replays the same stream in SQLite, and compares all
-Q3 groups rather than only printed examples:
-
-```powershell
-python scripts\compare_flink_sqlite.py data\sample_updates.csv `
-  --parallelism 4 --snapshot-every 1
+```text
+TOP10|sequence|rank|orderkey|orderdate|shippriority|revenue
+TOP10_EMPTY|sequence
 ```
 
-Run the full checked suite:
+Metrics mode emits:
+
+```text
+METRICS|count|mean_us|p50_us|p95_us|p99_us
+PROCESSING|count|seconds|updates_per_second
+WORKERS|active_workers|configured_workers|worker:records...
+```
+
+Latency is measured once per original input update, after every expected shard
+response has been combined and the Top-10 has been updated.
+
+## Correctness
+
+`compare_flink_sqlite.py` replays the same update stream in SQLite using exact
+integer arithmetic. It reconstructs every Flink group from emitted deltas and
+checks the full state at selected snapshots. It also compares every emitted
+Top-10 ranking, not only the final ranking.
 
 ```powershell
 .\scripts\run_correctness.ps1
 ```
 
-Checked results:
+Recorded evidence in `results/`:
 
-- Sample stream: 13 complete snapshots pass at parallelism 1, 2, 4, and 8.
-- Synthetic large stream: 155,400 updates and 16 snapshots pass at
-  parallelism 8.
-- TPC-H SF 0.01 stream: 76,675 updates and 16 snapshots pass at
-  parallelism 8.
+| Workload | Parallelism | Updates | Checked group snapshots | Verified Top-10 changes |
+|---|---:|---:|---:|---:|
+| Hand-written corner cases | 1, 2, 4, 8 | 13 | 13 per setting | 6 per setting |
+| TPC-H fixture FIFO | 4 | 8 | 8 | 1 |
+| Synthetic update stream | 8 | 155,400 | 16 | 351 |
+| TPC-H SF0.1 FIFO | 8 | 1,140,816 | 12 | 141 |
 
-## TPC-H Data
+Every recorded comparison has zero group mismatches and passes exact Top-10
+validation.
 
-Convert official TPC-H DBGEN output:
+## TPC-H Update Streams
 
-```powershell
-python scripts\convert_tpch_tbl_to_updates.py `
-  --customer C:\tpch\customer.tbl `
-  --orders C:\tpch\orders.tbl `
-  --lineitem C:\tpch\lineitem.tbl `
-  --output data\tpch_updates.csv
-```
-
-For a reproducible local TPC-H-compatible dataset, DuckDB's `dbgen` extension
-can generate the tables and run the complete experiment:
+Generate base tables and a deterministic FIFO stream:
 
 ```powershell
-.\scripts\run_tpch_experiment.ps1 -ScaleFactor 0.01
+.\scripts\run_tpch_experiment.ps1 -ScaleFactor 0.1 `
+  -WarmupRuns 1 -Repetitions 3
 ```
 
-SF 0.01 contains 1,500 customers, 15,000 orders, and 60,175 lineitems. The
-converted input contains 76,675 updates.
+The SF0.1 base data contains 15,000 customers, 150,000 orders, and 600,572
+lineitems. The generated stream first loads a 75,000-order window, then
+repeatedly deletes the oldest order and its lineitems before inserting a new
+order and its lineitems. It contains 1,140,816 updates: 765,572 insertions and
+375,244 deletions.
 
-## Experiments
+For official DBGen refresh files, convert RF1/RF2 with:
 
-`scripts\run_benchmark.ps1` generates update-heavy synthetic streams and runs
-the keyed maintenance operator at parallelism 1, 2, 4, and 8. Results include
-throughput and measured P50/P95/P99 end-to-operator latency.
+```powershell
+python scripts\convert_tpch_refresh_to_updates.py `
+  --customer data\tpch\customer.tbl `
+  --orders-base data\tpch\orders.tbl `
+  --orders-insert data\tpch\orders.tbl.u1 `
+  --lineitem-insert data\tpch\lineitem.tbl.u1 `
+  --delete-keys data\tpch\delete.1 `
+  --output data\tpch_refresh_updates.csv
+```
 
-The SF 0.01 TPC-H experiment produced:
+## Parallel Experiment
 
-| Parallelism | Updates/s | Mean us | P50 us | P95 us | P99 us |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 37,788.28 | 14,632.15 | 14,514 | 22,875 | 23,374 |
-| 2 | 37,935.63 | 17,795.53 | 16,015 | 29,085 | 29,857 |
-| 4 | 37,715.33 | 5,963.91 | 2,961 | 18,259 | 21,590 |
-| 8 | 37,663.54 | 6,338.67 | 3,969 | 19,328 | 27,359 |
+The committed SF0.1 experiment used one warm-up and three measured runs for
+each parallelism. `benchmark_q3.py` rejects a run unless every configured
+worker processed records.
 
-These are local bounded-file results and include Flink startup and shutdown.
-Throughput remains nearly constant because the single ordered file source and
-customer replication limit scaling at this data size. The lower median latency
-at parallelism 4 and 8 nevertheless shows that order-sharded maintenance is
-executing concurrently. No linear speedup is claimed.
+| Parallelism | Active workers | Processing updates/s (mean) | Std. dev. | Mean latency us | P50 us | P95 us | P99 us |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 654,465.24 | 68,597.79 | 7,547.01 | 6,340 | 14,736.67 | 27,103.33 |
+| 2 | 2 | 895,123.76 | 138,713.22 | 6,543.48 | 5,233.33 | 14,846.67 | 31,353.33 |
+| 4 | 4 | 828,483.05 | 35,911.26 | 5,275.98 | 3,196.67 | 16,320.00 | 44,766.67 |
+| 8 | 8 | 756,174.26 | 12,483.74 | 10,567.00 | 6,680 | 34,033.33 | 73,646.67 |
+
+Parallelism 2 gives the highest mean processing throughput, 36.8% above
+parallelism 1. Parallelism 4 is 26.6% above parallelism 1, while parallelism 8
+is 15.5% above it. Scaling is non-monotonic because customer updates are
+replicated and the ordered global aggregation/Top-10 stage is intentionally
+single-threaded. Wall-clock throughput is also stored in the raw result file;
+it includes JVM and local Flink startup/shutdown and is therefore lower.
+
+These are reproducible local measurements, not audited TPC benchmark results.
+Raw runs, summaries, environment details, and correctness tables are committed
+under `results/`.
+
+## Project Layout
+
+```text
+src/main/java/edu/hkust/ip/flink/   Flink algorithm and state
+src/test/java/                      JUnit tests
+data/                               sample and small TPC-H fixture
+scripts/                            generation, verification, and benchmarks
+results/                            raw and summarized experimental evidence
+final_report.md                     report source
+YUN_Hanxu_21286712_Final_Report.pdf final submission report
+```
+
+## References
+
+- Q. Wang and K. Yi, "Maintaining Acyclic Foreign-Key Joins under Updates,"
+  SIGMOD 2020, https://doi.org/10.1145/3318464.3380586
+- Q. Wang et al., "Cquirrel: Continuous Query Processing over Acyclic
+  Relational Schemas," PVLDB 2021.
+- TPC Benchmark H Standard Specification,
+  https://www.tpc.org/tpch/

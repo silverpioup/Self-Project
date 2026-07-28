@@ -7,3 +7,5 @@ data/tpch_sf*/
 *.tmp
 __pycache__/
 *.pyc
+.python-deps/
+tmp/

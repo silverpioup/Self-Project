@@ -1,7 +1,9 @@
-snapshot,sqlite_groups,flink_groups,mismatches,status
-1,0,0,0,PASS
-2,0,0,0,PASS
-3,0,0,0,PASS
-4,0,0,0,PASS
-5,1,1,0,PASS
-6,1,1,0,PASS
+snapshot,sqlite_groups,flink_groups,group_mismatches,top10_emitted_at_snapshot,emitted_top10_changes_verified,top10_validation,status
+1,0,0,0,NOT_EMITTED,1,PASS,PASS
+2,0,0,0,NOT_EMITTED,1,PASS,PASS
+3,0,0,0,NOT_EMITTED,1,PASS,PASS
+4,0,0,0,NOT_EMITTED,1,PASS,PASS
+5,0,0,0,NOT_EMITTED,1,PASS,PASS
+6,0,0,0,NOT_EMITTED,1,PASS,PASS
+7,0,0,0,NOT_EMITTED,1,PASS,PASS
+8,1,1,0,PASS,1,PASS,PASS
