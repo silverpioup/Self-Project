@@ -10,8 +10,8 @@
 
 ## Abstract
 
-This project implements continuous maintenance of TPC-H Query 3 over
-insertions and deletions using Apache Flink. The implementation specializes the
+I implemented continuous maintenance of TPC-H Query 3 over insertions and
+deletions using Apache Flink. The implementation specializes the
 live-tuple algorithm described by Wang and Yi and demonstrated in Cquirrel to
 the foreign-key chain `lineitem -> orders -> customer`. It stores base tuples,
 reverse indexes, live-state information, and aggregate revenue in Flink managed
@@ -47,9 +47,9 @@ implementation on Flink.
 Cquirrel presents the corresponding continuous-query system. It accepts an
 initially empty database followed by a Flink DataStream of insertions and
 deletions, and uses delta enumeration as the output model. Its Q3 example
-maintains indexes for customer, orders, lineitem, and aggregation. This project
-reproduces that algorithmic pattern for one query, with additional exact
-correctness and parallelism instrumentation. It does not claim to implement
+maintains indexes for customer, orders, lineitem, and aggregation. My
+implementation applies that pattern to Q3 and adds exact correctness checks and
+parallelism instrumentation. It is limited to Q3 and does not include
 Cquirrel's general query compiler.
 
 TPC-H Q3 was selected because it is the three-table example identified in the
@@ -234,10 +234,9 @@ required.
 3. Transaction Processing Performance Council, *TPC Benchmark H Standard Specification*, current version.
 4. Apache Flink, *Flink 1.19 Documentation*.
 
-# Appendix A: Meeting Minutes
+<!-- PAGEBREAK -->
 
-The fourth entry is a draft agenda because the meeting is scheduled after the
-date of this report revision.
+# Appendix A: Meeting Minutes
 
 ## Minutes of the 1st Project Meeting
 
@@ -267,6 +266,8 @@ conventional database, and then evaluate throughput and parallelism.
 The meeting adjourned at approximately 4:22 pm. The next meeting would review
 the selected query, update representation, and state design.
 
+<!-- PAGEBREAK -->
+
 ## Minutes of the 2nd Project Meeting
 
 **Date:** Wednesday, July 1, 2026  
@@ -292,6 +293,8 @@ SQLite was selected as the independent correctness baseline.
 
 The meeting adjourned at 4:30 pm. The next meeting would review the runnable
 Flink implementation and sample correctness results.
+
+<!-- PAGEBREAK -->
 
 ## Minutes of the 3rd Project Meeting
 
@@ -321,10 +324,13 @@ verify worker activity, repeat the parallel experiment, and finish the report.
 The meeting adjourned at 4:30 pm. The next meeting would review the final
 correctness evidence, parallel measurements, limitations, and report.
 
-## Draft Minutes of the 4th Project Meeting (Scheduled)
+<!-- PAGEBREAK -->
 
-**Date:** Monday, August 3, 2026  
+## Agenda and Minutes Template for the 4th Project Meeting
+
+**Date:** Thursday, August 6, 2026  
 **Time:** 4:00 pm-4:30 pm  
+**Status:** Scheduled  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
 **Apology:** None  
@@ -337,14 +343,16 @@ will be reviewed.
 
 ### 2. Discussion items
 
-The planned presentation covers the live-tuple algorithm, exact fixed-point
-aggregation, managed-state and checkpoint design, deterministic TPC-H SF0.1
-FIFO stream, SQLite comparisons, and three repeated runs at parallelism 1, 2,
-4, and 8. The discussion will also address the centralized ordered Top-10
-stage, customer replication, local-runtime limitations, repository contents,
-and possible corrections to the final submission.
+The planned discussion covers the Q3 live-tuple propagation rules, exact
+fixed-point aggregation, managed state and checkpoint recovery, the
+deterministic TPC-H SF0.1 FIFO stream, and the independent SQLite comparisons.
+The parallelism 1, 2, 4, and 8 results and active-worker records will be
+reviewed. The discussion will also cover the limits of the local experiment:
+customer replication, the single-threaded ordered Top-10 stage, and the
+non-transactional console sink. Space is left to record the supervisor's final
+comments and any corrections required before submission.
 
 ### 3. Meeting adjournment and next meeting
 
-The intended outcome is confirmation of the final code and report, subject to
-corrections requested during the meeting.
+The adjournment time, supervisor comments, and agreed corrections will be
+recorded after the meeting.

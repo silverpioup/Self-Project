@@ -1,10 +1,10 @@
 # Continuous TPC-H Q3 Maintenance with Apache Flink
 
-This repository contains a query-specific implementation of the live-tuple
-maintenance algorithm used by Cquirrel/AJU for TPC-H Query 3. It processes
-insertions and deletions over `customer`, `orders`, and `lineitem`, maintains
-the grouped revenue and official Q3 Top-10 incrementally, and emits only result
-changes.
+This repository contains the Flink job, verification scripts, experiment
+records, and final report for my CSIT6910 project. The job applies the
+live-tuple maintenance algorithm used by Cquirrel/AJU to TPC-H Query 3. It
+processes insertions and deletions over `customer`, `orders`, and `lineitem`,
+maintains grouped revenue and the official Q3 Top-10, and emits result changes.
 
 Code: https://github.com/silverpioup/Self-Project
 
@@ -34,7 +34,7 @@ contributes revenue exactly when it is live. A transition into or out of the
 live set produces the corresponding aggregate delta; unrelated join results
 are never materialized.
 
-This is a strict Q3 specialization, not a general SQL-to-Flink compiler.
+The implementation is limited to Q3 and does not compile arbitrary SQL.
 Because Q3's join graph is a chain, each non-leaf tuple has one child relation
 and its child-match count is either zero or one. The assertion-key machinery
 needed by general DAG-shaped queries is therefore unnecessary.
@@ -98,7 +98,7 @@ The portable helper performs the same build and sample run:
 .\scripts\run_sample.ps1
 ```
 
-No `mvn exec:java` command is required.
+Run the shaded JAR shown above; the Maven exec plugin is not part of the run path.
 
 ## Input and Output
 
@@ -206,9 +206,9 @@ replicated and the ordered global aggregation/Top-10 stage is intentionally
 single-threaded. Wall-clock throughput is also stored in the raw result file;
 it includes JVM and local Flink startup/shutdown and is therefore lower.
 
-These are reproducible local measurements, not audited TPC benchmark results.
-Raw runs, summaries, environment details, and correctness tables are committed
-under `results/`.
+These measurements come from the committed local runs; they are not audited
+TPC benchmark results. Raw runs, summaries, environment details, and
+correctness tables are under `results/`.
 
 ## Project Layout
 
