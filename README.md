@@ -153,7 +153,7 @@ Recorded evidence in `results/`:
 |---|---:|---:|---:|---:|
 | Hand-written corner cases | 1, 2, 4, 8 | 13 | 13 per setting | 6 per setting |
 | TPC-H fixture FIFO | 4 | 8 | 8 | 1 |
-| Synthetic update stream | 8 | 155,400 | 16 | 351 |
+| Synthetic update stream | 8 | 156,600 | 16 | 351 |
 | TPC-H SF0.1 FIFO | 8 | 1,140,816 | 12 | 141 |
 
 Every recorded comparison has zero group mismatches and passes exact Top-10

@@ -23,7 +23,7 @@ input update.
 
 Correctness was checked independently with SQLite. The verifier reconstructed
 the complete Flink result and compared all groups and every emitted Top-10
-change. All checks passed for hand-written corner cases, a 155,400-update
+change. All checks passed for hand-written corner cases, a 156,600-update
 synthetic stream, a small TPC-H fixture, and a 1,140,816-update TPC-H SF0.1
 FIFO stream. A repeated local experiment used parallelism 1, 2, 4, and 8 and
 confirmed that every configured worker was active. Parallelism 2 achieved the
@@ -162,7 +162,7 @@ models the FIFO update sequence discussed in the algorithm paper; it is not an
 audited TPC benchmark result.
 
 Additional tests used a 13-update hand-written stream, an eight-update TPC-H
-fixture, and a 155,400-update synthetic stream. The hand-written stream covers
+fixture, and a 156,600-update synthetic stream. The hand-written stream covers
 late-arriving parents, lineitem deletion, order deletion and reinsertion,
 customer predicate changes, and group removal.
 
@@ -180,7 +180,7 @@ All recorded correctness checks passed:
 |---|---:|---:|---:|---:|---|
 | Hand-written | 1, 2, 4, 8 | 13 | 13 each | 6 each | PASS |
 | TPC-H fixture FIFO | 4 | 8 | 8 | 1 | PASS |
-| Synthetic | 8 | 155,400 | 16 | 351 | PASS |
+| Synthetic | 8 | 156,600 | 16 | 351 | PASS |
 | TPC-H SF0.1 FIFO | 8 | 1,140,816 | 12 | 141 | PASS |
 
 Every comparison reported zero group mismatches. The SF0.1 test validates more
@@ -270,7 +270,7 @@ the selected query, update representation, and state design.
 
 ## Minutes of the 2nd Project Meeting
 
-**Date:** Wednesday, July 1, 2026  
+**Date:** Thursday, July 2, 2026  
 **Time:** 4:00 pm-4:30 pm  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
@@ -299,7 +299,7 @@ Flink implementation and sample correctness results.
 ## Minutes of the 3rd Project Meeting
 
 **Date:** Friday, July 24, 2026  
-**Time:** 4:00 pm-4:30 pm  
+**Time:** 9:00 am-9:30 am  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
 **Apology:** None  
@@ -321,7 +321,7 @@ verify worker activity, repeat the parallel experiment, and finish the report.
 
 ### 3. Meeting adjournment and next meeting
 
-The meeting adjourned at 4:30 pm. The next meeting would review the final
+The meeting adjourned at 9:30 am. The next meeting would review the final
 correctness evidence, parallel measurements, limitations, and report.
 
 <!-- PAGEBREAK -->
