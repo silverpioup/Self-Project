@@ -326,11 +326,10 @@ correctness evidence, parallel measurements, limitations, and report.
 
 <!-- PAGEBREAK -->
 
-## Agenda and Minutes Template for the 4th Project Meeting
+## Minutes of the 4th and Final Project Meeting
 
 **Date:** Thursday, August 6, 2026  
 **Time:** 4:00 pm-4:30 pm  
-**Status:** Scheduled  
 **Place:** Online meeting  
 **Present:** Prof. Ke Yi; YUN Hanxu  
 **Apology:** None  
@@ -339,20 +338,23 @@ correctness evidence, parallel measurements, limitations, and report.
 ### 1. Approval of minutes
 
 The implementation and verification actions recorded in the third meeting
-will be reviewed.
+were reviewed.
 
 ### 2. Discussion items
 
-The planned discussion covers the Q3 live-tuple propagation rules, exact
-fixed-point aggregation, managed state and checkpoint recovery, the
-deterministic TPC-H SF0.1 FIFO stream, and the independent SQLite comparisons.
-The parallelism 1, 2, 4, and 8 results and active-worker records will be
-reviewed. The discussion will also cover the limits of the local experiment:
-customer replication, the single-threaded ordered Top-10 stage, and the
-non-transactional console sink. Space is left to record the supervisor's final
-comments and any corrections required before submission.
+The completed implementation and evaluation were reviewed. The discussion
+covered the Q3 live-tuple propagation rules, exact fixed-point aggregation,
+managed state and checkpoint recovery, the deterministic TPC-H SF0.1 FIFO
+stream, and the independent SQLite comparisons. The parallelism 1, 2, 4, and 8
+results were examined together with the active-worker records. The limitations
+of the local experiment were recorded: customer updates are replicated, the
+ordered Top-10 stage is single-threaded, and the console sink is not
+transactional. The final report, experiment records, run instructions, and
+GitHub repository were checked for consistency.
 
 ### 3. Meeting adjournment and next meeting
 
-The adjournment time, supervisor comments, and agreed corrections will be
-recorded after the meeting.
+The meeting adjourned at 4:30 pm. This was the fourth and final project
+meeting, and no further meeting was scheduled. The final code, experiment
+records, and report were prepared for submission after the meeting-record
+corrections.
